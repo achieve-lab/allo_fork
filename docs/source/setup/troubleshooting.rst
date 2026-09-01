@@ -49,13 +49,25 @@ Run these checks before retrying a long build:
 
 The expected results are:
 
-* Python belongs to the active ``allo`` environment.
+* Python (must be at least 3.12) belongs to the active ``allo`` environment.
 * CMake, Ninja, and C/C++ compilers are available.
 * nanobind is version 2.x. Current Allo builds require
   ``nanobind>=2.9,<3.0``.
 * ``ALLO_ROOT`` points to the Allo repository root.
 * ``LLVM_BUILD_DIR`` points to the LLVM *build* directory, not the LLVM source
   directory.
+
+If the issues and fixes below do not cover the problem, raise a GitHub issue
+for help. Include the failing command, the first relevant error, the output of
+the checks above, and these additional diagnostics. Avoid including only the
+final generic pip traceback.
+
+.. code-block:: bash
+
+    git rev-parse HEAD
+    git submodule status
+    test -x "$LLVM_BUILD_DIR/bin/llvm-config"; echo "llvm-config: $?"
+    test -f "$LLVM_BUILD_DIR/lib/cmake/mlir/MLIRConfig.cmake"; echo "MLIRConfig.cmake: $?"
 
 Editable Install Runs in the Wrong Directory
 ============================================
@@ -306,55 +318,56 @@ backend build and is separate from Allo's generated extension in
 after the checks above demonstrate a Python/extension mismatch; it is not a
 general fix for unrelated import errors.
 
-Verify the Installation
-=======================
-
-After resolving the error, install from the repository root and perform a
-small import check:
-
-.. code-block:: bash
-
-    cd "$ALLO_ROOT"
-    python3 -m pip install -v -e .
-    python3 -c "import allo; import allo.ir"
-
-When Asking for Help
-====================
-
-Include the failing command, the first relevant error, and the output of these
-diagnostics. Avoid pasting only the final generic pip traceback.
-
-.. code-block:: bash
-
-    pwd
-    git rev-parse HEAD
-    git submodule status
-    python3 --version
-    python3 -c "import sys; print(sys.executable)"
-    cmake --version
-    ninja --version
-    python3 -m pip show nanobind
-    echo "LLVM_BUILD_DIR=$LLVM_BUILD_DIR"
-    test -x "$LLVM_BUILD_DIR/bin/llvm-config"; echo "llvm-config: $?"
-    test -f "$LLVM_BUILD_DIR/lib/cmake/mlir/MLIRConfig.cmake"; echo "MLIRConfig.cmake: $?"
-
 Vitis Environment Library Conflicts
 ===================================
 
-If you encounter the following issue when building Allo, it is mostly because you source the Vitis environment at the same time, which may cause some library conflicts. Please disable it and try again.
+**Symptom**
+
+The Allo build fails while CMake is starting:
 
 .. code-block:: console
 
   running build_ext
     cmake: error while loading shared libraries: libidn.so.11: cannot open shared object file: No such file or directory
 
+**Cause**
+
+The Vitis environment is sourced in the same shell and introduces conflicting
+library paths.
+
+**Fix**
+
+Disable the Vitis environment, or start a new shell without sourcing it, and
+then build Allo again:
+
+.. code-block:: bash
+
+    cd "$ALLO_ROOT"
+    python3 -m pip install -v -e .
+
 Too Many Open Files
 ===================
 
-If you are seeing the errors reported by the linker like this:
+**Symptom**
+
+The linker reports that it cannot open an LLVM or MLIR library even though the
+file exists:
 
 .. code-block:: console
 
   /opt/rh/devtoolset-9/root/usr/libexec/gcc/x86_64-redhat-linux/9/ld: cannot find /work/shared/common/llvm-project-main/build/lib/libMLIRLLVMToLLVMIRTranslation.a: Too many open files
 
-It means you have hit the limit of file descriptors that can be open at a time. You can fix this by :code:`ulimit -n 4096`, then try compiling Allo again.
+**Cause**
+
+The build has reached the shell's limit on simultaneously open file
+descriptors.
+
+**Fix**
+
+Increase the limit for the current shell, then build Allo again:
+
+.. code-block:: bash
+
+    ulimit -n 4096
+    cd "$ALLO_ROOT"
+    python3 -m pip install -v -e .
