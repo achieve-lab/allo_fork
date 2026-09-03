@@ -441,4 +441,5 @@ def test_two_composed_indexed_linear_layers_vhls_codegen():
 
     assert "void indexed_linear(" in hls_code
     assert "void indexed_linear_1(" in hls_code
-    assert hls_code.count("#pragma HLS pipeline II=1 rewind") == 4
+    assert hls_code.count("#pragma HLS pipeline II=1") == 4
+    assert hls_code.count("#pragma HLS pipeline II=1 rewind") == 2
