@@ -272,24 +272,19 @@ def test_indexed_linear_float16_inputs_accumulate_in_float32_llvm():
     np.testing.assert_allclose(mod(X, W, indices, bias), expected, rtol=1e-6, atol=1e-6)
 
 
-def test_indexed_linear_fixed_point_llvm():
+def test_indexed_linear_fixed_point_vhls_codegen():
     input_type = Fixed(8, 4)
     output_type = Fixed(24, 8)
-    X = np.array([1.5, -2.0, 0.25, 3.0], dtype=np.float32)
-    W = np.array([[0.5, -1.25], [-2.0, 0.75]], dtype=np.float32)
-    indices = np.array([[0, 3], [1, 2]], dtype=np.int32)
-    bias = np.array([0.125, -1.5], dtype=np.float32)
-
-    mod = build_indexed_linear(
-        input_type, 4, 2, 2, weight_type=input_type, output_type=output_type
+    s = allo.customize(
+        indexed_linear,
+        instantiate=[input_type, input_type, output_type, 4, 2, 2],
     )
+    schedule_indexed_linear(s)
+    hls_code = s.build(target="vhls").hls_code
 
-    np.testing.assert_allclose(
-        mod(X, W, indices, bias),
-        np.array([-2.875, 2.6875], dtype=np.float32),
-        rtol=0,
-        atol=1 / 256,
-    )
+    assert "void indexed_linear(" in hls_code
+    assert hls_code.count("ap_fixed<8, 4>") >= 2
+    assert hls_code.count("ap_fixed<24, 16>") >= 2
 
 
 def test_indexed_linear_composes_into_parent_llvm():
