@@ -3,7 +3,61 @@
 # pylint: disable=used-before-assignment, unsubscriptable-object, unsupported-assignment-operation, chained-comparison
 
 from .. import dsl
+from ..ir.types import int32
 from .systolic import systolic
+
+
+def indexed_linear[
+    TyX, TyW, TyO, N_IN, N_OUT, N_ACTIVE
+](
+    X: "TyX[N_IN]",
+    W: "TyW[N_OUT, N_ACTIVE]",
+    indices: "int32[N_OUT, N_ACTIVE]",
+    bias: "TyO[N_OUT]",
+) -> "TyO[N_OUT]":
+    """Apply a fixed-fan-in sparse linear transformation.
+
+    ``indices[o, k]`` identifies the input multiplied by ``W[o, k]``. Each
+    output therefore stores exactly ``N_ACTIVE`` weights, regardless of the
+    full input extent ``N_IN``.
+    """
+    Z: TyO[N_OUT]
+    for o_init in range(N_OUT):
+        Z[o_init] = bias[o_init]
+    for k in range(N_ACTIVE):
+        for o in range(N_OUT):
+            Z[o] += X[indices[o, k]] * W[o, k]
+    return Z
+
+
+def schedule_indexed_linear(s, output_parallelism=1):
+    """Pipeline indexed linear and optionally evaluate outputs in parallel.
+
+    Parallel output lanes can read unrelated input indices. Complete input
+    partitioning supplies those reads, while output-major arrays use cyclic
+    banking across the lanes.
+    """
+    if output_parallelism < 1:
+        raise ValueError("output_parallelism must be positive")
+
+    s.pipeline("indexed_linear:o_init")
+    s.pipeline("indexed_linear:o", rewind=True)
+
+    if output_parallelism > 1:
+        # Imported lazily to avoid a library/customize import cycle.
+        from ..customize import Partition
+
+        s.unroll("indexed_linear:o_init", factor=output_parallelism)
+        s.unroll("indexed_linear:o", factor=output_parallelism)
+        for buffer in (s.W, s.indices, s.bias, s.Z):
+            s.partition(
+                buffer,
+                partition_type=Partition.Cyclic,
+                dim=1,
+                factor=output_parallelism,
+            )
+        s.partition(s.X, partition_type=Partition.Complete, dim=1)
+    return s
 
 
 def linear2d[

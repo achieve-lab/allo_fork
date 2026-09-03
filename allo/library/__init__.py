@@ -16,6 +16,8 @@ from .gemv import (
 )
 
 from .nn import (
+    indexed_linear,
+    schedule_indexed_linear,
     linear2d,
     linear3d,
     schedule_linear2d,
@@ -66,6 +68,7 @@ KERNEL2SCHEDULE[int8xint8_mat_vec] = schedule_int8xint8_mat_vec
 
 KERNEL2SCHEDULE.update(
     {
+        indexed_linear: schedule_indexed_linear,
         linear2d: schedule_linear2d,
         linear3d: schedule_linear3d,
         relu2d: schedule_relu2d,
