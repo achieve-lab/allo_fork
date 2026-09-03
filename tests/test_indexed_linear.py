@@ -10,8 +10,22 @@ from allo.library import indexed_linear, schedule_indexed_linear
 
 
 def indexed_linear_reference(X, W, indices, bias):
-    """NumPy reference for a fixed-fan-in indexed linear layer."""
-    return bias + np.sum(W * X[indices], axis=1)
+    """Follow the kernel's active-slot-major accumulation order exactly."""
+    output = bias.copy()
+    for k in range(W.shape[1]):
+        for o in range(W.shape[0]):
+            output[o] += W[o, k] * X[indices[o, k]]
+    return output
+
+
+def build_indexed_linear(allo_type, n_in, n_out, n_active, output_parallelism=1):
+    """Build one scheduled indexed-linear specialization for LLVM."""
+    s = allo.customize(
+        indexed_linear,
+        instantiate=[allo_type, allo_type, allo_type, n_in, n_out, n_active],
+    )
+    schedule_indexed_linear(s, output_parallelism=output_parallelism)
+    return s.build(target="llvm")
 
 
 @pytest.mark.parametrize(
@@ -37,12 +51,7 @@ def test_indexed_linear_llvm(
         [rng.choice(n_in, size=n_active, replace=False) for _ in range(n_out)]
     ).astype(np.int32)
 
-    s = allo.customize(
-        indexed_linear,
-        instantiate=[allo_type, allo_type, allo_type, n_in, n_out, n_active],
-    )
-    schedule_indexed_linear(s, output_parallelism=output_parallelism)
-    mod = s.build(target="llvm")
+    mod = build_indexed_linear(allo_type, n_in, n_out, n_active, output_parallelism)
 
     actual = mod(X, W, indices, bias)
     expected = indexed_linear_reference(X, W, indices, bias)
@@ -52,10 +61,132 @@ def test_indexed_linear_llvm(
         np.testing.assert_array_equal(actual, expected)
 
 
+def test_indexed_linear_hand_computed_llvm():
+    X = np.array([2.0, -1.0, 0.5, 3.0], dtype=np.float32)
+    W = np.array([[1.5, -2.0], [4.0, 0.25], [0.5, -1.0]], dtype=np.float32)
+    indices = np.array([[0, 2], [1, 3], [3, 0]], dtype=np.int32)
+    bias = np.array([0.5, -0.5, 1.0], dtype=np.float32)
+
+    mod = build_indexed_linear(float32, 4, 3, 2)
+
+    np.testing.assert_allclose(
+        mod(X, W, indices, bias),
+        np.array([2.5, -3.75, 0.5], dtype=np.float32),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+
+@pytest.mark.parametrize(
+    "X,W,indices,bias,expected",
+    [
+        pytest.param(
+            np.array([7], dtype=np.int32),
+            np.array([[3]], dtype=np.int32),
+            np.array([[0]], dtype=np.int32),
+            np.array([-2], dtype=np.int32),
+            np.array([19], dtype=np.int32),
+            id="minimum-shape",
+        ),
+        pytest.param(
+            np.array([2, -1, 4], dtype=np.int32),
+            np.array([[1, 2, -3], [4, -2, 1]], dtype=np.int32),
+            np.array([[0, 0, 2], [1, 1, 1]], dtype=np.int32),
+            np.array([5, -3], dtype=np.int32),
+            np.array([-1, -6], dtype=np.int32),
+            id="repeated-indices",
+        ),
+        pytest.param(
+            np.array([-3, 2, 8], dtype=np.int32),
+            np.zeros((2, 2), dtype=np.int32),
+            np.array([[0, 2], [2, 1]], dtype=np.int32),
+            np.array([4, -7], dtype=np.int32),
+            np.array([4, -7], dtype=np.int32),
+            id="zero-weights-return-bias",
+        ),
+    ],
+)
+def test_indexed_linear_edge_cases_llvm(X, W, indices, bias, expected):
+    n_out, n_active = W.shape
+    mod = build_indexed_linear(int32, X.shape[0], n_out, n_active)
+
+    np.testing.assert_array_equal(mod(X, W, indices, bias), expected)
+
+
+def test_indexed_linear_matches_reconstructed_dense_llvm():
+    rng = np.random.default_rng(1)
+    n_in, n_out, n_active = 6, 5, 4
+    X = rng.standard_normal(n_in).astype(np.float32)
+    W = rng.standard_normal((n_out, n_active)).astype(np.float32)
+    # Repeated indices are intentional: their weights must add in the dense form.
+    indices = rng.integers(0, n_in, size=(n_out, n_active), dtype=np.int32)
+    bias = rng.standard_normal(n_out).astype(np.float32)
+    dense_W = np.zeros((n_out, n_in), dtype=np.float32)
+    for o in range(n_out):
+        for k in range(n_active):
+            dense_W[o, indices[o, k]] += W[o, k]
+
+    mod = build_indexed_linear(float32, n_in, n_out, n_active)
+
+    np.testing.assert_allclose(
+        mod(X, W, indices, bias), dense_W @ X + bias, rtol=1e-5, atol=1e-5
+    )
+
+
+@pytest.mark.parametrize(
+    "output_parallelism",
+    [
+        pytest.param(1, id="serial"),
+        pytest.param(2, id="partial-nondivisible"),
+        pytest.param(5, id="fully-unrolled"),
+    ],
+)
+def test_indexed_linear_schedule_variants_llvm(output_parallelism):
+    n_in, n_out, n_active = 7, 5, 3
+    X = np.array([1.0, -2.0, 3.0, 0.5, -1.5, 4.0, 2.5], dtype=np.float32)
+    W = np.array(
+        [
+            [0.5, -1.0, 2.0],
+            [1.5, 0.25, -0.5],
+            [-2.0, 1.0, 0.75],
+            [0.0, -1.5, 2.5],
+            [1.25, -0.75, 0.5],
+        ],
+        dtype=np.float32,
+    )
+    indices = np.array(
+        [[0, 3, 6], [1, 4, 2], [5, 0, 3], [6, 2, 1], [4, 5, 0]],
+        dtype=np.int32,
+    )
+    bias = np.array([0.25, -0.5, 1.0, 2.0, -1.25], dtype=np.float32)
+    mod = build_indexed_linear(float32, n_in, n_out, n_active, output_parallelism)
+
+    np.testing.assert_allclose(
+        mod(X, W, indices, bias),
+        indexed_linear_reference(X, W, indices, bias),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+
+def test_indexed_linear_default_vhls_codegen():
+    s = allo.customize(
+        indexed_linear,
+        instantiate=[float32, float32, float32, 8, 5, 3],
+    )
+    schedule_indexed_linear(s)
+    hls_code = s.build(target="vhls").hls_code
+
+    assert "void indexed_linear" in hls_code
+    assert "#pragma HLS pipeline II=1 rewind" in hls_code
+    assert "#pragma HLS unroll" not in hls_code
+    assert "#pragma HLS array_partition" not in hls_code
+
+
 def test_indexed_linear_vhls_codegen():
     s = allo.customize(
         indexed_linear,
-        instantiate=[float32, float32, float32, 8, 4, 3],
+        instantiate=[float32, float32, float32, 8, 5, 3],
     )
     schedule_indexed_linear(s, output_parallelism=2)
     hls_code = s.build(target="vhls").hls_code
@@ -67,10 +198,22 @@ def test_indexed_linear_vhls_codegen():
     assert "complete dim=1" in hls_code
 
 
-def test_indexed_linear_schedule_rejects_nonpositive_parallelism():
+@pytest.mark.parametrize("output_parallelism", [0, -1])
+def test_indexed_linear_schedule_rejects_nonpositive_parallelism(
+    output_parallelism,
+):
     s = allo.customize(
         indexed_linear,
         instantiate=[float32, float32, float32, 4, 2, 2],
     )
     with pytest.raises(ValueError, match="output_parallelism must be positive"):
-        schedule_indexed_linear(s, output_parallelism=0)
+        schedule_indexed_linear(s, output_parallelism=output_parallelism)
+
+
+def test_indexed_linear_schedule_rejects_noninteger_parallelism():
+    s = allo.customize(
+        indexed_linear,
+        instantiate=[float32, float32, float32, 4, 2, 2],
+    )
+    with pytest.raises(TypeError, match="output_parallelism must be an integer"):
+        schedule_indexed_linear(s, output_parallelism=1.5)

@@ -37,6 +37,8 @@ def schedule_indexed_linear(s, output_parallelism=1):
     partitioning supplies those reads, while output-major arrays use cyclic
     banking across the lanes.
     """
+    if not isinstance(output_parallelism, int):
+        raise TypeError("output_parallelism must be an integer")
     if output_parallelism < 1:
         raise ValueError("output_parallelism must be positive")
 
